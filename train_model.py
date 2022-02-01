@@ -68,8 +68,15 @@ def make_bert_preprocess_model(sentence_features, seq_length=128):
     return tf.keras.Model(input_segments, model_inputs)
 
 
-def load_dataset_from_tfds(in_memory_ds, info, split, batch_size, bert_preprocess_model):
+def load_dataset_from_tfds(in_memory_ds, info, split, batch_size, bert_preprocess_model, error_ratio=0):
     is_training = split.startswith('train')
+
+    # エラーを付与する部分
+    miss_info = ''
+    if is_training and error_ratio > 0:
+        in_memory_ds[split]['label'], miss_info = make_miss_label(in_memory_ds[split]['label'], error_ratio, tfds_name)
+        print(miss_info)
+
     dataset = tf.data.Dataset.from_tensor_slices(in_memory_ds[split])
     num_examples = info.splits[split].num_examples
 
@@ -82,7 +89,7 @@ def load_dataset_from_tfds(in_memory_ds, info, split, batch_size, bert_preproces
     dataset = dataset.batch(batch_size)
     dataset = dataset.map(lambda ex: (bert_preprocess_model(ex), ex['label']))
     dataset = dataset.cache().prefetch(buffer_size=tf.data.AUTOTUNE)
-    return dataset, num_examples
+    return dataset, num_examples, miss_info
 
 
 def build_classifier_model(num_classes):
@@ -129,16 +136,21 @@ def get_configuration(glue_task, num_train_steps, num_warmup_steps):
     return metrics, loss, optimizer
 
 
-def save_bert_model(saved_model_path, bert_preprocess_model, classifier_model):
+def save_bert_model(saved_model_dir, bert_preprocess_model, classifier_model, miss_info, error_ratio):
     preprocess_inputs = bert_preprocess_model.inputs
     bert_encoder_inputs = bert_preprocess_model(preprocess_inputs)
     bert_outputs = classifier_model(bert_encoder_inputs)
     model_for_export = tf.keras.Model(preprocess_inputs, bert_outputs)
 
-    print('Saving', saved_model_path)
+    # save error detail
+    text_path = os.path.join(saved_model_dir, 'misstake_detail.txt')
+    with open(text_path, 'a', encoding='UTF-8') as f:
+        f.write(miss_info)
 
     # Save everything on the Colab host (even the variables from TPU memory)
     save_options = tf.saved_model.SaveOptions(experimental_io_device='/job:localhost')
+    saved_model_path = os.path.join(saved_model_dir, f'ratio_{error_ratio}'.replace('.', ''))
+    print('Saving', saved_model_path)
     model_for_export.save(saved_model_path, include_optimizer=False, options=save_options)
 
 
@@ -217,28 +229,31 @@ def main():
     # データセットのロードと整理
     in_memory_ds = tfds.load(tfds_name, data_dir=datasets_path, batch_size=-1, shuffle_files=True)
 
-    # エラー率ごとそれぞれで学習とセーブ
-    error_ratio_list = [0.0]
-    for error_ratio in error_ratio_list:
-        train_dataset, train_data_size = load_dataset_from_tfds(
-            in_memory_ds,
-            tfds_info,
-            train_split,
-            batch_size,
-            bert_preprocess_model,
-        )
-        steps_per_epoch = train_data_size // batch_size
-        num_train_steps = steps_per_epoch * epochs
-        num_warmup_steps = num_train_steps // 10
+    # 複数GPUで処理
+    mirrored_strategy = tf.distribute.MirroredStrategy()
+    with mirrored_strategy.scope():
+        error_ratio_list = [0.0, 0.1, 0.2, 0.3]
+        for error_ratio in error_ratio_list:
+            train_dataset, train_data_size, miss_info = load_dataset_from_tfds(
+                in_memory_ds,
+                tfds_info,
+                train_split,
+                batch_size,
+                bert_preprocess_model,
+                error_ratio
+            )
+            validation_dataset, validation_data_size, _ = load_dataset_from_tfds(
+                in_memory_ds,
+                tfds_info,
+                validation_split,
+                batch_size,
+                bert_preprocess_model
+            )
 
-        validation_dataset, validation_data_size = load_dataset_from_tfds(
-            in_memory_ds,
-            tfds_info,
-            validation_split,
-            batch_size,
-            bert_preprocess_model
-        )
-        validation_steps = validation_data_size // batch_size
+            steps_per_epoch = train_data_size // batch_size
+            num_train_steps = steps_per_epoch * epochs
+            num_warmup_steps = num_train_steps // 10
+            validation_steps = validation_data_size // batch_size
 
         # 推論器や誤差関数などの設定
         classifier_model = build_classifier_model(num_classes)
@@ -254,12 +269,11 @@ def main():
             validation_steps=validation_steps
         )
 
-        # モデルの保存
-        bert_type = tfhub_handle_encoder.split('/')[-2]
-        saved_model_name = f'{tfds_name.replace("/", "_")}_{bert_type}'
-        saved_model_dir = os.path.join(main_save_path, saved_model_name)
-        saved_model_path = os.path.join(saved_model_dir, f'ratio_{error_ratio}'.replace('.', ''))
-        save_bert_model(saved_model_path, bert_preprocess_model, classifier_model)
+            # モデルの保存
+            bert_type = tfhub_handle_encoder.split('/')[-2]
+            saved_model_name = f'{tfds_name.replace("/", "_")}_{bert_type}'
+            saved_model_dir = os.path.join(main_save_path, saved_model_name)
+            save_bert_model(saved_model_dir, bert_preprocess_model, classifier_model, miss_info, error_ratio)
 
 
 if __name__ == '__main__':

@@ -18,8 +18,8 @@ bert_model_name = 'bert_en_uncased_L-12_H-768_A-12'
 tfhub_handle_encoder, tfhub_handle_preprocess = get_model_url(bert_model_name)
 
 # glueのタスク選択（以下から選んでね）
-# glue/cola, glue/sst2, glue/mrpc, glue/qqp, glue/mnli, glue/qnli, glue/rte, glue/wnli
-tfds_name = 'glue/sst2'
+tasks = ['glue/cola', 'glue/sst2', 'glue/mrpc', 'glue/qqp', 'glue/mnli', 'glue/qnli', 'glue/rte', 'glue/wnli']
+tfds_name = tasks[0]
 
 # 学習パラメータ設定
 epochs = 3
@@ -154,48 +154,9 @@ def save_bert_model(saved_model_dir, bert_preprocess_model, classifier_model, mi
     model_for_export.save(saved_model_path, include_optimizer=False, options=save_options)
 
 
-def print_example(which_target=''):
-    if which_target == 'preprocess' or '':
-        # 前処理用モデルのテスト
-        test_preprocess_model = make_bert_preprocess_model(['my_input1', 'my_input2'])
-        test_text = [np.array(['some random test sentence']), np.array(['another sentence'])]
-        text_preprocessed = test_preprocess_model(test_text)
-        print('Keys           : ', list(text_preprocessed.keys()))
-        print('Shape Word Ids : ', text_preprocessed['input_word_ids'].shape)
-        print('Word Ids       : ', text_preprocessed['input_word_ids'][0, :16])
-        print('Shape Mask     : ', text_preprocessed['input_mask'].shape)
-        print('Input Mask     : ', text_preprocessed['input_mask'][0, :16])
-        print('Shape Type Ids : ', text_preprocessed['input_type_ids'].shape)
-        print('Type Ids       : ', text_preprocessed['input_type_ids'][0, :16])
-        print()
-    if which_target == 'classifier_model' or '':
-        # 推論器のテスト
-        test_classifier_model = build_classifier_model(2)
-        bert_raw_result = test_classifier_model(text_preprocessed)
-        print(tf.sigmoid(bert_raw_result))
-
-
 def main():
     # 前処理モデルのロード
     bert_preprocess = hub.load(tfhub_handle_preprocess)
-
-    # トークナイザのインスタンス化
-    tok = bert_preprocess.tokenize(tf.constant(['Hello TensorFlow!']))
-    print(tok, '\n')
-    text_preprocessed = bert_preprocess.bert_pack_inputs([tok, tok], tf.constant(20))
-    print('Shape Word Ids : ', text_preprocessed['input_word_ids'].shape)
-    print('Word Ids       : ', text_preprocessed['input_word_ids'][0, :16])
-    print('Shape Mask     : ', text_preprocessed['input_mask'].shape)
-    print('Input Mask     : ', text_preprocessed['input_mask'][0, :16])
-    print('Shape Type Ids : ', text_preprocessed['input_type_ids'].shape)
-    print('Type Ids       : ', text_preprocessed['input_type_ids'][0, :16])
-    print()
-
-    # 前処理と推論器のテスト表示
-    # print_example()
-
-    # モデル構造全体のイメージ画像を表示
-    # tf.keras.utils.plot_model(test_preprocess_model, show_shapes=True, show_dtype=True)
 
     # 対象タスクのデータセットをロード
     tfds_info = tfds.builder(tfds_name, data_dir=datasets_path).info
@@ -221,7 +182,6 @@ def main():
     print(f'Number of classes: {num_classes}')
     print(f'Features {sentence_features}')
     print(f'Splits {available_splits}')
-    print()
 
     print(f'Fine tuning {tfhub_handle_encoder} model')
     bert_preprocess_model = make_bert_preprocess_model(sentence_features)
@@ -255,19 +215,19 @@ def main():
             num_warmup_steps = num_train_steps // 10
             validation_steps = validation_data_size // batch_size
 
-        # 推論器や誤差関数などの設定
-        classifier_model = build_classifier_model(num_classes)
-        metrics, loss, optimizer = get_configuration(tfds_name, num_train_steps, num_warmup_steps)
-        classifier_model.compile(optimizer=optimizer, loss=loss, metrics=[metrics])
+            # 推論器や誤差関数などの設定
+            classifier_model = build_classifier_model(num_classes)
+            metrics, loss, optimizer = get_configuration(tfds_name, num_train_steps, num_warmup_steps)
+            classifier_model.compile(optimizer=optimizer, loss=loss, metrics=[metrics])
 
-        # 学習の実行部分
-        classifier_model.fit(
-            x=train_dataset,
-            validation_data=validation_dataset,
-            steps_per_epoch=steps_per_epoch,
-            epochs=epochs,
-            validation_steps=validation_steps
-        )
+            # 学習の実行部分
+            classifier_model.fit(
+                x=train_dataset,
+                validation_data=validation_dataset,
+                steps_per_epoch=steps_per_epoch,
+                epochs=epochs,
+                validation_steps=validation_steps
+            )
 
             # モデルの保存
             bert_type = tfhub_handle_encoder.split('/')[-2]
